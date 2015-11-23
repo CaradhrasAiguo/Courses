@@ -1,0 +1,477 @@
+---
+title: "36-350 Final Project"
+author: "ehliu, kshu, hanwenz"
+date: "Monday, 8 December 2014"
+output: html_document
+---
+
+```{r}
+#SET-UP#
+src<-readLines("playbyplay.txt")[-c(1:3)]
+src<-src[-(length(src))]
+gameids.matches.raw<-regexpr(pattern="[0-9]{8}[A-z]{6}", src)
+gameids.matches<-regmatches(src, gameids.matches.raw)
+dates<-sapply(gameids.matches, function(x) strtoi(substr(x, 1, 8)))
+away<-sapply(gameids.matches, function(x) substr(x, 9, 11))
+home<-sapply(gameids.matches, function(x) substr(x, 12, 14))
+
+code<-c("SAS","UTA","GSW","PHI")
+alt<-c("SAN","UTH","GOS","PHL")
+for (i in 1:length(code)){
+  home<-ifelse(home == code[i],alt[i],home)
+}
+
+times.matches.raw<-regexpr(pattern="(-)?[0-9]{2}:[0-9]{2}:[0-9]{2}", src)
+time.remaining<-regmatches(src, times.matches.raw)
+index.re=regexpr(pattern="[0-9]* \\| (-)?[0-9]{2}", src)
+indices=regmatches(src, index.re)
+indices=gsub(" \\| (-)?[0-9]{2}", "", indices)
+
+dats<-data.frame(game=gameids.matches, dates, away, home, indices, time.remaining, awaypts=numeric(length(home)), homepts=numeric(length(home)), scoring.team=rep(NA, length(home)), scoring.team.score=numeric(length(home)), non.scoring.team.score=numeric(length(home)),scoring.team.is.home=rep(NA, length(home)))
+first.player.col.idx<-length(dats)+1
+
+#SCORING PLAYS#
+scoring.play.RE<-"[A-Z]{3} [0-9]+-[0-9]+"
+scoring.play.indices<-grep(pattern=scoring.play.RE, src)
+scoring.plays.matches.raw<-src[scoring.play.indices]
+scoring.teams<-sapply(regmatches(scoring.plays.matches.raw, gregexpr(scoring.play.RE, scoring.plays.matches.raw)), function(x) substr(x,1,3))
+
+rmv.dash<-function(str) {
+  return(gsub('-', '', str))
+}
+scoring.team.scores.matches<-gregexpr('[0-9]+-', scoring.plays.matches.raw)
+scoring.team.scores<-sapply(rmv.dash(regmatches(m=scoring.team.scores.matches, x=scoring.plays.matches.raw)), strtoi)
+
+non.scoring.team.scores.matches<-gregexpr('[0-9]+-[0-9]+', scoring.plays.matches.raw)
+non.scoring.team.scores<-sapply(gsub("[0-9]+-", "", regmatches(m=non.scoring.team.scores.matches, x=scoring.plays.matches.raw)), strtoi)
+
+dats$scoring.team[scoring.play.indices]<-scoring.teams
+dats$scoring.team.score[scoring.play.indices]<-scoring.team.scores
+dats$non.scoring.team.score[scoring.play.indices]<-non.scoring.team.scores
+
+dats$scoring.team.is.home<-rep(NA, length(dats$home))
+dats$scoring.team.is.home[scoring.play.indices]<-scoring.teams==dats$home[scoring.play.indices]
+
+# Points scored at each scoring play. 
+scoring<-dats$scoring.team.score[scoring.play.indices][1:(length(scoring.play.indices)-1)]
+scoring.shift<-dats$scoring.team.score[scoring.play.indices][2:length(scoring.play.indices)]
+non.scoring<-dats$non.scoring.team.score[scoring.play.indices][1:(length(scoring.play.indices)-1)]
+non.scoring.shift<-dats$non.scoring.team.score[scoring.play.indices][2:length(scoring.play.indices)]
+
+game.id<-dats$game[scoring.play.indices][1:(length(scoring.play.indices)-1)]
+game.id.shift= dats$game[scoring.play.indices][2:length(scoring.play.indices)]
+game.not.changed<-(game.id.shift == game.id)
+
+scoredPts<-scoring.shift - game.not.changed*scoring+non.scoring.shift-game.not.changed*non.scoring 
+scoredPts<-c(dats$scoring.team.score[scoring.play.indices][1]+dats$non.scoring.team.score[scoring.play.indices][1],scoredPts)
+
+
+dats$homepts[scoring.play.indices] <- scoredPts*(dats$scoring.team.is.home[scoring.play.indices])
+dats$awaypts[scoring.play.indices] <- scoredPts*(!dats$scoring.team.is.home[scoring.play.indices])
+indices<-which(dats$game == "20060310LALSAS")
+dats$homepts[indices[length(indices)]]<-2
+
+indices<-which(dats$awaypts == 401 | dats$awaypts == -399)
+dats$awaypts[indices]<-c(1,1)
+
+#SUBSTITUTIONS#
+
+subst.RE<-"[A-z]{3}\\] [A-z.\\'\\-]+\\s?([A-z.\\'\\-]+)* Substitution replaced by [A-z.\\'\\-]+\\s?([A-z.\\'\\-]+)*"
+
+subst.indices<-grep(pattern=subst.RE, src)
+subst.matches.raw<-src[subst.indices]
+substitutions<-gsub('[A-z]{3}] ', '', regmatches(subst.matches.raw, gregexpr(subst.RE, subst.matches.raw)))
+subst.teams=substring(regmatches(subst.matches.raw, gregexpr(subst.RE, subst.matches.raw)),1,3)
+rotating.players<-function(str) {
+  words<-unlist(strsplit(str, split=" "))
+  idx<-which(words=="Substitution")
+  return(c(paste(words[1:(idx-1)], collapse=' '), paste(words[(idx+3):(length(words))], collapse=' ')))
+}
+replaced.players<-function(str) {
+  return(rotating.players(str)[1])
+}
+subst.players<-function(str) {
+  return(rotating.players(str)[2])
+}
+rotated<-data.frame(index=subst.indices, team=subst.teams, subst.player=unlist(sapply(substitutions, subst.players)), replaced.player=unlist(sapply(substitutions, replaced.players)))
+
+split.game=split(dats, dats$game)
+
+pure.ball.terms<-c("Turnover", "Layup", "Alley", "Jump", "Rebound", "Foul", "Driving", "Timeout", "Dunk", "Substitution", "Violation", "Free", "Turnaround", "Reverse", "Running", "Ejection", "Fade", "Slam", "Finger", "Hook", "Follow", "Tip", "-In")
+
+coaches.RE="COACH LINE-AB"
+coaches.indices=grep(pattern=coaches.RE, src)
+fouling.coaches<-regmatches(src[coaches.indices], regexpr("\\] [A-z.\\'\\-]+\\s?([A-z.\\'\\-]+)*", src[coaches.indices]))
+fouling.coaches<-gsub("] ", "", fouling.coaches)
+fouling.coaches<-gsub(" Ejection", "", fouling.coaches)
+fouling.coaches<-gsub("[A-z]+\\. ", "", fouling.coaches)
+fouling.coaches<-unique(gsub(" Foul", "", fouling.coaches))
+
+
+teams=unique(regmatches(src, regexpr(pattern="\\[[A-Z]{3}\\]", src)))
+teams=teams[-which(teams=="[TBD]")]
+plays=sapply(teams, function(t) grep(t, src, fixed=TRUE))
+players=sapply(plays, function(p) regmatches(src[p], regexpr("\\] [A-z.\\'\\-]+\\s?([A-z.\\'\\-]+)*", src[p])))
+players=sapply(players, function(p) gsub("] ","",p))
+
+for(ix in 1:length(pure.ball.terms)) {
+  players=sapply(players, function(p) gsub(pure.ball.terms[ix], "", p))
+  players=sapply(players, function(p) gsub(" $", "", p))
+}
+
+remove.team=c("Team", "Team No")
+players=sapply(players, function(p) setdiff(p, remove.team))
+players=sapply(players, function(p) setdiff(p, fouling.coaches))
+players=sapply(players, unique)
+special=data.frame(code=c("[SAS]", "[UTA]", "[GSW]", "[PHI]"), alt=c("[SAN]", "[UTH]", "[GOS]", "[PHI]"))
+```
+
+```{r}
+game.to.src.index<-function(game, idx)  {
+  return(as.integer(rownames(game[idx,])))
+}
+
+game.to.rotate.index<-function(game, idx)  {
+  src.index<-game.to.src.index(game, idx)
+  return(which(rotated$index == src.index))
+}
+
+on.court.substitutions<-function(game)  {
+  game.indices<-1:nrow(game)
+  src.indices<-unlist(sapply(game.indices, game.to.src.index, game=game))
+  #correct inconsistency in team codes
+  game.home=paste("[", game$home[1], "]", sep="")
+  game.away=paste("[", game$away[1], "]", sep="")
+  if(game.away %in% special$code) {
+    game.away=special$alt[which(special$code==game.away)]
+  }
+  if(game.home %in% special$code) {
+    game.home=special$alt[which(special$code==game.home)]
+  }
+  indices.in.rotated<-which(rotated$index %in% as.integer(rownames(game)))
+  rotated.indices.wrt.game<-which(as.integer(rownames(game)) %in% rotated$index)
+  
+  overtime<-any(substring(game$time.remaining,1,1)=="-") #true IFF game went overtime
+  
+  q2=which(game$time.remaining=="00:36:00")
+  q3=which(game$time.remaining=="00:24:00")
+  if(all(game$game == "20060315CHIMIL")) { q3<-213 } #no period demarcation where there should have been (in original .txt)
+  if(all(game$game == "20060315DALHOU")) { q3<-206 } #period demarcation badly misplaced in original .txt
+  q4=which(game$time.remaining=="00:12:00")
+  timeup<-which(game$time.remaining=="00:00:00")
+  q4.end<-ifelse(overtime, timeup[length(timeup)], nrow(game))
+  #dividing the indices wrt the game by quarter
+  game.rot.q1<-subset(rotated.indices.wrt.game, rotated.indices.wrt.game<=q2[length(q2)])
+  game.rot.q2<-subset(rotated.indices.wrt.game, rotated.indices.wrt.game>q2[length(q2)] & rotated.indices.wrt.game<=q3[length(q3)])
+  game.rot.q3<-subset(rotated.indices.wrt.game, rotated.indices.wrt.game>q3[length(q3)] & rotated.indices.wrt.game<=q4[length(q4)])
+  game.rot.q4<-subset(rotated.indices.wrt.game, rotated.indices.wrt.game>q4[length(q4)])
+  #dividing the indices wrt the src by quarter 
+  rot.q1<-rotated[unlist(sapply(game.rot.q1, game.to.rotate.index, game=game)),]
+  rot.q2<-rotated[unlist(sapply(game.rot.q2, game.to.rotate.index, game=game)),]
+  rot.q3<-rotated[unlist(sapply(game.rot.q3, game.to.rotate.index, game=game)),]
+  rot.q4<-rotated[unlist(sapply(game.rot.q4, game.to.rotate.index, game=game)),]
+  #all players
+  home.players<-players[[game.home]]
+  away.players<-players[[game.away]]
+  #given a player's name, find the plays where he was substituting and being replaced
+  when.rotated<-function(str, rot.subset) {
+    res<-list(subset(rot.subset, subst.player == str)$index, subset(rot.subset, replaced.player == str)$index)
+    names(res)<-c("subs.plays", "repl.plays")
+    return(res)
+  }
+  home.rot.q1<-sapply(home.players, when.rotated, rot.subset=rot.q1)
+  away.rot.q1<-sapply(away.players, when.rotated, rot.subset=rot.q1)
+  home.rot.q2<-sapply(home.players, when.rotated, rot.subset=rot.q2)
+  away.rot.q2<-sapply(away.players, when.rotated, rot.subset=rot.q2)
+  home.rot.q3<-sapply(home.players, when.rotated, rot.subset=rot.q3)
+  away.rot.q3<-sapply(away.players, when.rotated, rot.subset=rot.q3)
+  home.rot.q4<-sapply(home.players, when.rotated, rot.subset=rot.q4)
+  away.rot.q4<-sapply(away.players, when.rotated, rot.subset=rot.q4)
+  #these indices are wrt the game in question
+  q1.bounds<-c(1, q2[length(q2)])
+  q2.bounds<-c(q2[length(q2)]+1, q3[length(q3)])
+  q3.bounds<-c(q3[length(q3)]+1, q4[length(q4)])
+  q4.bounds<-c(q4[length(q4)]+1, q4.end)
+  #now do the fill in work...
+  psh <- data.frame(matrix(ncol=length(players[[game.home]]), nrow=nrow(game)))
+  colnames(psh)<-players[[game.home]]
+  playsh<-sapply(players[[game.home]], function(x) grep(x, src[src.indices])) #indices of plays where a player is involved
+  for(plah in 1:length(players[[game.home]])) {
+    psh[playsh[[plah]],plah]<-1 #where someone is involved in a play, fill in as present on court
+  }
+  #do the same for the game.away
+  psa <- data.frame(matrix(ncol=length(players[[game.away]]), nrow=nrow(game)))
+  colnames(psa)<-players[[game.away]]
+  playsa<-sapply(players[[game.away]], function(x) grep(x, src[src.indices]))
+  for(plaa in 1:length(players[[game.away]])) {
+    psa[playsa[[plaa]],plaa]<-1
+  }
+  #given a matrix (psh or psa), the indices at which a team member is involved in a play, the index of a particular player, and the subst/repl times of said player, fill in the indicator variables of idx-th column of said matrix
+  subst.fill<-function(mat, plays.idx, quarter.bounds, idx, lst) {
+    stopifnot(idx %in% 1:(dim(mat)[2]))
+    stopifnot(all(c("subs.plays", "repl.plays") %in% names(lst)))
+    stopifnot(length(quarter.bounds)==2 && all(quarter.bounds %% 1==0) && quarter.bounds[1] < quarter.bounds[2])
+    #end sanity checks
+    quarter.indices<-quarter.bounds[1]:quarter.bounds[2]
+    has.subs<-length(lst$subs.plays)!=0
+    has.repl<-length(lst$repl.plays)!=0
+    game.subs.indices<-sapply(lst$subs.plays, function(idx) which(idx == src.indices))
+    game.repl.indices<-sapply(lst$repl.plays, function(idx) which(idx == src.indices))
+    if(!(has.subs || has.repl)) {
+      #not involved in any substitutions --> either present whole period (if any plays) or back-burner
+      if(any(quarter.indices %in% plays.idx[[idx]])) { mat[quarter.indices,idx]=1}
+      else { mat[quarter.indices,idx]<-0}
+    }
+    else if(has.subs && !has.repl)  {
+      mat[quarter.bounds[1]:(game.subs.indices[1]-1), idx]<-0
+      mat[game.subs.indices[1]:quarter.bounds[2], idx]<-1
+    }
+    else if(!has.subs && has.repl)  {
+      mat[quarter.bounds[1]:(game.repl.indices[1]-1), idx]<-1
+      mat[game.repl.indices[1]:quarter.bounds[2], idx]<-0
+    }
+    else {
+      if(game.subs.indices[1] < game.repl.indices[1]) {
+        mat[quarter.bounds[1]:(game.subs.indices[1]-1), idx]<-0
+        mat[game.subs.indices[1]:(game.repl.indices[1]-1), idx]<-1
+        mat[game.repl.indices[1]:quarter.bounds[2], idx]<-0
+      }
+      else if(game.subs.indices[1] > game.repl.indices[1]) {
+        mat[quarter.bounds[1]:(game.repl.indices[1]-1), idx]<-1
+        mat[game.repl.indices[1]:(game.subs.indices[1]-1), idx]<-0
+        mat[game.subs.indices[1]:quarter.bounds[2], idx]<-1
+        mat[,idx]
+      }
+      else {break}
+    }
+    return(mat)
+  }
+  starting.min<-as.integer(substr(game$time.remaining[1],4,5))
+  if(starting.min >= 36){ #normal
+    #HOME
+    for(idx in 1:length(home.players))  {
+      psh<-subst.fill(psh, playsh, q1.bounds, idx, home.rot.q1[,idx])
+    }
+    for(idx in 1:length(home.players))  {
+      psh<-subst.fill(psh, playsh, q2.bounds, idx, home.rot.q2[,idx])
+    }
+    for(idx in 1:length(home.players))  {
+      psh<-subst.fill(psh, playsh, q3.bounds, idx, home.rot.q3[,idx])
+    }
+    #AWAY
+    for(idx in 1:length(away.players))  {
+      psa<-subst.fill(psa, playsa, q1.bounds, idx, away.rot.q1[,idx])
+    }
+    for(idx in 1:length(away.players))  {
+      psa<-subst.fill(psa, playsa, q2.bounds, idx, away.rot.q2[,idx])
+    }
+    for(idx in 1:length(away.players))  {
+      psa<-subst.fill(psa, playsa, q3.bounds, idx, away.rot.q3[,idx])
+    }
+  }
+  else {  #only three quarters
+    for(idx in 1:length(home.players))  {
+      psh<-subst.fill(psh, playsh, c(1, q3[length(q3)]), idx, home.rot.q3[,idx])
+    }
+    for(idx in 1:length(home.players))  {
+      psa<-subst.fill(psa, playsa, c(1, q3[length(q3)]), idx, away.rot.q3[,idx])
+    }
+  }
+  for(idx in 1:length(home.players))  {
+    psh<-subst.fill(psh, playsh, q4.bounds, idx, home.rot.q4[,idx])
+  }
+  for(idx in 1:length(away.players))  {
+    psa<-subst.fill(psa, playsa, q4.bounds, idx, away.rot.q4[,idx])
+  }
+  if(overtime)  {
+    all.period.ends<-grep("End Period", src[src.indices]) #this RegEx is more reliable
+    period.ends<-subset(all.period.ends, all.period.ends > timeup[length(timeup)])
+    get.interval<-function(k) {
+      if(k==1)  { return(c(timeup[length(timeup)]+1, period.ends[1])) }
+      else {  return(c(period.ends[k-1]+1, period.ends[k]))}
+    }
+    if(length(period.ends) > 0) {
+      overtime.intervals<-sapply(1:length(period.ends), get.interval)  }    
+    else {
+      overtime.intervals<-matrix(c(q4.end+1, nrow(game)), nrow=2,ncol=1)
+    }
+    for(k in 1:ncol(overtime.intervals))  {
+      ov<-overtime.intervals[,k]
+      ov.rot.indices<-subset(rotated.indices.wrt.game, rotated.indices.wrt.game%in%(ov[1]:ov[2]))
+      rot.ov<-rotated[unlist(sapply(ov.rot.indices, game.to.rotate.index, game=game)),]
+      home.rot.ov<-sapply(home.players, when.rotated, rot.subset=rot.ov)
+      away.rot.ov<-sapply(away.players, when.rotated, rot.subset=rot.ov)      
+      for(idx in 1:length(home.players))  {
+        psh<-subst.fill(psh, playsh, ov, idx, home.rot.ov[,idx])
+      }
+      for(idx in 1:length(away.players))  {
+        psa<-subst.fill(psa, playsa, ov, idx, away.rot.ov[,idx])
+      }
+    }
+  }
+  #any(which(is.na(psh)))
+  #any(which(is.na(psa))) these are sanity checks
+  aggregate.lst<-list(cbind(game, psa), cbind(game, psh))
+  names(aggregate.lst)<-c("Away.DF", "Home.DF")
+  return(aggregate.lst)
+}
+
+games.filled<-lapply(split.game, on.court.substitutions)
+```
+
+```{r}
+all.players<-unique(unlist(players))
+## Calculate plus-minus and on court time statistics
+plusMinus.help<-function(name,ownTeamScores,otherTeamScores,df){
+  index<-which(df[[name]] == 1)
+  
+  plus<-sum(ownTeamScores[index])
+  minus<-sum(otherTeamScores[index])
+  return (plus-minus)
+}
+
+parse.time= function(time) {
+  if(substring(time,1,1)=="-") {
+    return(-(60*as.double(substring(time,2,3))+as.double(substring(time,5,6))+as.double(substring(time,8,9))/60))
+  }
+  return(60*as.double(substring(time,1,2))+as.double(substring(time,4,5))+as.double(substring(time,7,8))/60)
+}
+
+group.index<-function(indices){
+  #indices<-present.indices
+  diffs<-diff(indices) #in general, diffs[i]=indices[i+1]-indices[i]
+  if(all(diffs==1)) { return(t(c(indices[1], indices[length(indices)]))) }
+  else {
+    nonconsecutive.loc<-which(diffs>1)
+    get.interval<-function(k) {
+      stopifnot(k %in% 1:length(nonconsecutive.loc))
+      if(k==1)  { return(c(1, nonconsecutive.loc[1])) }
+      else {  return(c(nonconsecutive.loc[k-1]+1, nonconsecutive.loc[k]))  }
+    }
+    return(rbind(t(sapply(1:length(nonconsecutive.loc), get.interval)), t(c(nonconsecutive.loc[length(nonconsecutive.loc)]+1, indices[length(indices)]))))
+  }
+}
+
+play.time.length.helper<-function(player,game.info){
+  #player="Howard"
+  #game.info=games.filled[[1]]$Away.DF
+  #player="Diop"
+  #print(player)
+  time.remaining<-sapply(game.info$"time.remaining", parse.time)
+  present.indices<-which(game.info[player] == 1)
+  if(length(present.indices) > 0) {
+    grouped.index<-group.index(present.indices)
+    time.from.interval<-function(k) {
+      interval<-as.integer(grouped.index[k,])
+      return(time.remaining[interval[1]]-time.remaining[interval[2]])
+    }
+    return(sum(unlist(sapply(1:(nrow(grouped.index)), time.from.interval))))
+  }
+  else { return(0) }
+}
+
+play.time.length<-function(game){
+  #game=games.filled[[1]]
+  away<-game$Away.DF
+  home<-game$Home.DF
+  gameID<-away$game[1]
+  players.away<-names(away)[first.player.col.idx:ncol(away)]
+  players.home<-names(home)[first.player.col.idx:ncol(home)]
+  
+  players.away.time<-unlist(sapply(players.away, play.time.length.helper, game.info=away))
+  players.home.time<-unlist(sapply(players.home, play.time.length.helper, game.info=home))
+  
+  res<-list(players.away.time, players.home.time)
+  names(res)<-c("Away.Time", "Home.Time")
+  return(res)
+}
+#on.court.time.stats<-do.call("rbind", lapply(games.filled, play.time.length))
+
+calculateStats<-function(game){
+  away<-game$Away.DF
+  home<-game$Home.DF
+  gameID<-as.character(away$game[1])
+
+  players.away<-names(away)[first.player.col.idx:ncol(away)]
+  players.home<-names(home)[first.player.col.idx:ncol(home)]
+  player.times<-play.time.length(game)
+  stats.away<-data.frame(Player=c(players.away), gameID=rep(gameID,times=length(players.away)), pm=unlist(lapply(X=players.away,FUN=plusMinus.help, ownTeamScores=away$awaypts,otherTeamScores=away$homepts,df=away)), oct=player.times$Away.Time)
+  rownames(stats.away)<-players.away
+  
+  stats.home<-data.frame(Player=c(players.home), gameID=rep(gameID,times=length(players.home)),pm=unlist(lapply(X=players.home,FUN=plusMinus.help, ownTeamScores=home$homepts,otherTeamScores=home$awaypts,df=home)), oct=player.times$Home.Time)
+  rownames(stats.home)<-players.home
+  return(rbind(stats.away,stats.home))
+}
+final.stats<-lapply(games.filled, calculateStats)
+final.stats<-do.call("rbind",final.stats)
+
+## visualization
+# find pm/minutes for each player
+
+# find total pm for each player
+#AGGREGATE STATS
+player.pm.total<-function(str)  {
+  return(sum(final.stats$pm[final.stats$Player==str]))
+}
+player.time.total<-function(str)  {
+  return(sum(final.stats$oct[final.stats$Player==str]))
+}
+players.season.totals<-data.frame(Player=all.players, Season.PM=unlist(sapply(all.players, player.pm.total)), Season.Time=unlist(sapply(all.players, player.time.total)))
+players.season.totals$Mean.Minutely.PM<-ifelse(players.season.totals$Season.Time != 0, players.season.totals$Season.PM/players.season.totals$Season.Time, NA)
+
+top10.pm<-rev(sort(players.season.totals$Season.PM))[1:10]
+top10.pm.players<-players.season.totals[with(players.season.totals, rev(order(Season.PM))), ]$Player[1:10]
+bot10.pm<-sort(players.season.totals$Season.PM)[1:10]
+bot10.pm.players<-players.season.totals[with(players.season.totals, order(Season.PM)), ]$Player[1:10]
+
+top10.time<-rev(sort(players.season.totals$Season.Time))[1:10]
+top10.time.players<-players.season.totals[with(players.season.totals, rev(order(Season.Time))), ]$Player[1:10]
+num.back.burners<-length(which(players.season.totals$Season.Time == 0))
+bot10.time<-sort(players.season.totals$Season.Time)[(num.back.burners+1):(num.back.burners+10)]
+bot10.time.players<-players.season.totals[with(players.season.totals, order(Season.Time)), ]$Player[(num.back.burners+1):(num.back.burners+10)]
+
+head(players.season.totals)
+top10.pm.min<-rev(sort(players.season.totals$Mean.Minutely.PM))[1:10]
+top10.pm.min.players<-players.season.totals[with(players.season.totals, rev(order(Mean.Minutely.PM))), ]$Player[1:10]
+bot10.pm.min<-sort(players.season.totals$Mean.Minutely.PM)[1:10]
+bot10.pm.min.players<-players.season.totals[with(players.season.totals, order(Mean.Minutely.PM)), ]$Player[1:10]
+#PLOTTING
+par(mfrow=c(1,2))
+barplot(top10.pm, las=2, col="Red", main="Top 10 players by seasonal net PM")
+axis(1, at=1:10, labels=top10.pm.players)
+barplot(bot10.pm, las=2, col="Red", main="Bottom 10 players by seasonal net PM")
+axis(1, at=1:10, labels=bot10.pm.players)
+
+par(mfrow=c(1,2))
+barplot(top10.time, las=2, col="Red", ylab="Total time on court (min)", main="Top 10 players by seasonal time")
+axis(1, at=1:10, labels=top10.pm.players)
+barplot(bot10.time, las=2, col="Red", ylab="Total time on court (min)", main="Bottom 10 players by seasonal time")
+axis(1, at=1:10, labels=bot10.pm.players)
+
+par(mfrow=c(1,2))
+barplot(top10.pm.min, las=2, col="Red", main="Top 10 players by seasonal net PM/min")
+axis(1, at=1:10, labels=top10.pm.min.players)
+barplot(bot10.pm.min, las=2, col="Red", main="Bottom 10 players by seasonal net PM/min")
+axis(1, at=1:10, labels=bot10.pm.min.players)
+
+#For the top 10 players by aggregate P/M, plot P/M across matches
+plot.pm.over.matches<-function(player.name){
+  player.indices<-which(final.stats$Player == player.name)
+  player.pm<-final.stats$pm[player.indices]
+  player.gameIDs<-final.stats$gameID[player.indices]
+  match.num<-1:(length(player.indices))
+  plot(match.num, player.pm, main = paste("Plus/minus Across Games:",player.name),xlab = "Games",ylab="Plus/minus Statistics",pch=20)
+  abline(h=0,col="red")
+}
+#plotting all ten at once will produce an error in RStudio!
+par(mfrow=c(1,2))
+sapply(top10.pm.players[1:2], plot.pm.over.matches)
+par(mfrow=c(1,2))
+sapply(top10.pm.players[3:4], plot.pm.over.matches)
+par(mfrow=c(1,2))
+sapply(top10.pm.players[5:6], plot.pm.over.matches)
+par(mfrow=c(1,2))
+sapply(top10.pm.players[7:8], plot.pm.over.matches)
+par(mfrow=c(1,2))
+sapply(top10.pm.players[9:10], plot.pm.over.matches)
+```
